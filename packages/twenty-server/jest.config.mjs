@@ -10,6 +10,8 @@ const jestConfig = {
   // to enable logs, comment out the following line
   silent: true,
   ...(isCI && { reporters: ['./jest-failures-only-reporter.js'] }),
+  // TEMP DIAGNOSTIC (revert): main-process instrumentation to name the aborter.
+  globalSetup: './jest-global-setup.cjs',
   errorOnDeprecated: true,
   clearMocks: true,
   displayName: 'twenty-server',

@@ -18,58 +18,56 @@ declare global {
   }
 }
 
-// TEMP DIAGNOSTIC (to be reverted) — the in-band jest run (maxWorkers=1) aborts
-// silently when an async error escapes a finished suite. Register a per-file
-// unhandledRejection + uncaughtException logger that names the current test and
-// prints the stack, so the CI server-test log identifies the real source.
-type LeakDiagProcess = NodeJS.Process & {
-  __leakRejectionHandler?: (reason: unknown) => void;
-  __leakExceptionHandler?: (error: unknown) => void;
+// TEMP DIAGNOSTIC (to be reverted) — test-process instrumentation. Wrap
+// process.exit to capture the caller stack, log exit codes, and ticker memory,
+// tagged with pid so we can tell in-band (same pid as globalSetup) from worker.
+type DiagProcess = NodeJS.Process & {
+  __diagStInstalled?: boolean;
+  __diagStOrigExit?: (code?: number) => never;
 };
 
-const leakDiagProcess = process as LeakDiagProcess;
+const diagProcess = process as DiagProcess;
 
-const logLeak = (kind: string, value: unknown): void => {
-  const error = value instanceof Error ? value : new Error(String(value));
-
-  let testName = '<between-tests-or-unknown>';
-  let testPath = '<unknown>';
-
+const diagWrite = (message: string): void => {
   try {
-    const state = (
-      expect as unknown as {
-        getState?: () => { currentTestName?: string; testPath?: string };
-      }
-    ).getState?.();
-
-    testName = state?.currentTestName ?? testName;
-    testPath = state?.testPath ?? testPath;
+    process.stderr.write(message);
   } catch {
     // best-effort
   }
-
-  process.stderr.write(
-    `\n[LEAK] ${kind} | test="${testName}" | path=${testPath}\n` +
-      `${error.stack ?? String(error)}\n[/LEAK]\n`,
-  );
 };
 
-if (leakDiagProcess.__leakRejectionHandler) {
-  process.removeListener(
-    'unhandledRejection',
-    leakDiagProcess.__leakRejectionHandler,
-  );
-}
-leakDiagProcess.__leakRejectionHandler = (reason) =>
-  logLeak('unhandledRejection', reason);
-process.on('unhandledRejection', leakDiagProcess.__leakRejectionHandler);
+if (!diagProcess.__diagStInstalled) {
+  diagProcess.__diagStInstalled = true;
 
-if (leakDiagProcess.__leakExceptionHandler) {
-  process.removeListener(
-    'uncaughtException',
-    leakDiagProcess.__leakExceptionHandler,
+  diagWrite(`\n[DIAG-ST] installed pid=${process.pid}\n`);
+
+  diagProcess.__diagStOrigExit = process.exit.bind(process) as (
+    code?: number,
+  ) => never;
+
+  process.exit = ((code?: number): never => {
+    diagWrite(
+      `\n[DIAG-ST-EXIT-CALL] process.exit(${String(code)}) pid=${process.pid}\n` +
+        `${new Error('process.exit called from').stack}\n`,
+    );
+
+    return (diagProcess.__diagStOrigExit as (code?: number) => never)(code);
+  }) as typeof process.exit;
+
+  process.on('exit', (code) =>
+    diagWrite(`\n[DIAG-ST-ON-EXIT] code=${code} pid=${process.pid}\n`),
   );
+
+  const ticker = setInterval(() => {
+    const usage = process.memoryUsage();
+
+    diagWrite(
+      `[DIAG-ST-MEM] rss=${Math.round(usage.rss / 1048576)}MB ` +
+        `heapUsed=${Math.round(usage.heapUsed / 1048576)}MB pid=${process.pid}\n`,
+    );
+  }, 4000);
+
+  if (typeof ticker.unref === 'function') {
+    ticker.unref();
+  }
 }
-leakDiagProcess.__leakExceptionHandler = (error) =>
-  logLeak('uncaughtException', error);
-process.on('uncaughtException', leakDiagProcess.__leakExceptionHandler);
