@@ -18,35 +18,58 @@ declare global {
   }
 }
 
-// twenty-server's jest CI run is in-band (`nx` runs the `test` target with the
-// `ci` configuration, which sets `maxWorkers: 1`), so every *.spec.ts shares a
-// single Node process. Jest attributes a rejection to the test running at the
-// time, but a promise leaked by an already-finished suite rejects with no
-// owner. With no `unhandledRejection` listener registered, Node's default
-// action then tears the whole process down (exit 1) — surfacing as a silent,
-// flaky CI failure with no failed test and no jest summary, blamed on whichever
-// suite happened to be running rather than on the one that leaked the promise.
-//
-// Register a single process-wide listener so a stray rejection can no longer
-// abort the run, and print its stack so the leaking suite can be found and
-// fixed at the source. The guard lives on `process` (shared across the in-band
-// test files) so the listener is installed exactly once.
-type ProcessWithRejectionGuard = NodeJS.Process & {
-  __twentyUnhandledRejectionListenerInstalled?: boolean;
+// TEMP DIAGNOSTIC (to be reverted) — the in-band jest run (maxWorkers=1) aborts
+// silently when an async error escapes a finished suite. Register a per-file
+// unhandledRejection + uncaughtException logger that names the current test and
+// prints the stack, so the CI server-test log identifies the real source.
+type LeakDiagProcess = NodeJS.Process & {
+  __leakRejectionHandler?: (reason: unknown) => void;
+  __leakExceptionHandler?: (error: unknown) => void;
 };
 
-const processWithRejectionGuard = process as ProcessWithRejectionGuard;
+const leakDiagProcess = process as LeakDiagProcess;
 
-if (!processWithRejectionGuard.__twentyUnhandledRejectionListenerInstalled) {
-  processWithRejectionGuard.__twentyUnhandledRejectionListenerInstalled = true;
+const logLeak = (kind: string, value: unknown): void => {
+  const error = value instanceof Error ? value : new Error(String(value));
 
-  process.on('unhandledRejection', (reason) => {
-    const error = reason instanceof Error ? reason : new Error(String(reason));
+  let testName = '<between-tests-or-unknown>';
+  let testPath = '<unknown>';
 
-    process.stderr.write(
-      '\n[twenty-server tests] Ignored an unhandled promise rejection so it ' +
-        'cannot abort the in-band run. Fix the test that leaks this promise ' +
-        `(await it, or attach a .catch):\n${error.stack ?? String(error)}\n`,
-    );
-  });
+  try {
+    const state = (
+      expect as unknown as {
+        getState?: () => { currentTestName?: string; testPath?: string };
+      }
+    ).getState?.();
+
+    testName = state?.currentTestName ?? testName;
+    testPath = state?.testPath ?? testPath;
+  } catch {
+    // best-effort
+  }
+
+  process.stderr.write(
+    `\n[LEAK] ${kind} | test="${testName}" | path=${testPath}\n` +
+      `${error.stack ?? String(error)}\n[/LEAK]\n`,
+  );
+};
+
+if (leakDiagProcess.__leakRejectionHandler) {
+  process.removeListener(
+    'unhandledRejection',
+    leakDiagProcess.__leakRejectionHandler,
+  );
 }
+leakDiagProcess.__leakRejectionHandler = (reason) =>
+  logLeak('unhandledRejection', reason);
+process.on('unhandledRejection', leakDiagProcess.__leakRejectionHandler);
+
+if (leakDiagProcess.__leakExceptionHandler) {
+  process.removeListener(
+    'uncaughtException',
+    leakDiagProcess.__leakExceptionHandler,
+  );
+}
+leakDiagProcess.__leakExceptionHandler = (error) =>
+  logLeak('uncaughtException', error);
+process.on('uncaughtException', leakDiagProcess.__leakExceptionHandler);
