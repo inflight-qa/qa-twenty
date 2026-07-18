@@ -116,13 +116,13 @@ export const SignInUp = () => {
     }
 
     if (isGlobalScope) {
-      return t`Welcome to Twenty`;
+      return t`Welcome to Twenty (Inflight QA)`;
     }
 
     const workspaceName = workspacePublicData?.displayName;
 
     if (!workspaceName) {
-      return t`Welcome to your workspace`;
+      return t`Welcome to your workspace (Inflight QA)`;
     }
 
     return t`Welcome, ${workspaceName}.`;
